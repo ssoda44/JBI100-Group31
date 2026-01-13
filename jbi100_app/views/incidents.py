@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-
+from dash import no_update
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -283,15 +283,7 @@ def _staff_per_service(
         rolling_base = s_values.rolling(window=ROLL_WIN, min_periods=1).mean().shift(1)
         
         agg.loc[idx, "staff_delta"] = (s_values - rolling_base).values
-        # Debugging check
-        if 22 in g['week'].values:
-            # We look at weeks 1-6 (indices 0-5)
-            window_data = s_values.iloc[22-6:22] 
-            print(f"--- Debugging {svc} (Ignoring 0s) ---")
-            print(f"Data in window: {window_data.tolist()}") # You will see [val, val, nan, val, val, nan]
-            print(f"Valid count: {window_data.count()}")   # Should be 4
-            print(f"Mean calculated: {window_data.mean()}") # Should be Sum / 4
-            print(f"median calculated: {window_data.median()}") # Median for reference
+
 
     svc_names = sorted(agg["service"].dropna().astype(str).unique().tolist())
     weeks_full = pd.MultiIndex.from_product([weeks, svc_names], names=["week", "service"]).to_frame(index=False)
@@ -734,19 +726,14 @@ def layout() -> html.Div:
     Output("inc-fig1", "figure"),
     Output("inc-fig2", "figure"),
     Output("inc-fig3", "figure"),
-    Output("shared-selected-week", "data"), # Added Output for shared global store
     Input("week-range", "value"),
     Input("service-filter", "value"),
-    Input("event-filter", "value"),
-    Input("incidents-table", "selected_rows"),
-    State("incidents-table", "data"), # Added State to read the table data
+    Input("event-filter", "value")
 )
 def update_incidents(
     week_range: List[int],
     services: List[str],
-    events: List[str],
-    selected_rows: Optional[List[int]],
-    table_data: Optional[List[dict]], # Added table_data state parameter
+    events: List[str]
 ):
     if not week_range or len(week_range) != 2:
         week_range = [1, 52]
@@ -762,14 +749,7 @@ def update_incidents(
 
     # --- SHARED WEEK SELECTION MECHANISM ---
     shared_week = 1 # Default week value
-    if selected_rows and table_data:
-        try:
-            # Extract the week number from the selected table row
-            row_data = table_data[selected_rows[0]]
-            raw_week = str(row_data.get('week', '1'))
-            shared_week = int(raw_week.replace('W', '')) # Parse 'WXX' format to integer
-        except (ValueError, TypeError, IndexError):
-            shared_week = 1
+
     # ---------------------------------------
 
     if weekly_df is None or weekly_df.empty or not metrics:
@@ -778,8 +758,7 @@ def update_incidents(
             [],
             _empty_fig("KPI", "No data."),
             _empty_fig("Staff", "No data."),
-            _empty_fig("Fingerprint", "No data."),
-            shared_week # Return shared_week for dcc.Store
+            _empty_fig("Fingerprint", "No data.")
         )
 
     # ---- incident table (compute using all weeks; then filter rows by selected events) ----
@@ -810,8 +789,26 @@ def update_incidents(
     if incidents_df is None or incidents_df.empty:
         return (
             "0 incident(s) detected (UNUSUAL/RARE) under current filters.", 
-            [], fig1, fig2, fig3, shared_week
+            [], fig1, fig2, fig3
         )
 
     summary = f"{len(incidents_df)} incident(s) detected (UNUSUAL/RARE) under current filters."
-    return summary, incidents_df.to_dict("records"), fig1, fig2, fig3, shared_week
+    return summary, incidents_df.to_dict("records"), fig1, fig2, fig3
+
+
+# CALLBACK 2: Specific Sync (Triggers only on table interaction)
+@callback(
+    Output("shared-selected-week", "data"),
+    Input("incidents-table", "selected_rows"),
+    State("incidents-table", "data"),
+    prevent_initial_call=True
+)
+def sync_selection_to_store(selected_rows, table_data):
+    if not selected_rows or not table_data:
+        return no_update
+    try:
+        row = table_data[selected_rows[0]]
+        week_val = int(str(row['week']).replace('W', ''))
+        return week_val
+    except:
+        return no_update
