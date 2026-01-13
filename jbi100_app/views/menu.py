@@ -101,3 +101,20 @@ def layout():
         ],
         className="page-shell",
     )
+from dash import Input, Output, callback
+
+@callback(
+    Output("event-filter", "disabled"),
+    Output("event-filter", "style"),
+    Input("layer-selector", "value")
+)
+def toggle_event_filter_by_layer(selected_layer):
+    """
+    Disables the Event filter interface when the Diagnosis layer is active.
+    """
+    if selected_layer == "diagnosis":
+        # Disable the dropdown and dim it visually
+        return True, {"opacity": "0.5", "pointerEvents": "none"}
+    
+    # Re-enable for Overview, Incidents, or Impact layers
+    return False, {"opacity": "1", "pointerEvents": "auto"}
