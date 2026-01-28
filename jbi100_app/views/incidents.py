@@ -7,8 +7,9 @@ from dash import no_update
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 
-from dash import html, dcc, callback, Input, Output, State # Added State
+from dash import html, dcc, callback, Input, Output, State
 from dash import dash_table
 
 from ..data import get_data
@@ -27,8 +28,8 @@ _staff_week_service_df = getattr(_bundle, "staff_week_service_df", pd.DataFrame(
 # Tuning
 # =====================================================
 ROLL_WIN = 6
-SOFT_Z_TH = 2.5
-SEVERE_Z_TH = 3.5
+SOFT_Z_TH = 1.0
+SEVERE_Z_TH = 2.0
 MIN_POINTS = 8
 Z_CLAMP = 12.0
 
@@ -91,11 +92,6 @@ def _available_metrics(df: pd.DataFrame) -> List[str]:
 
 
 def _make_week_mask(weekly_df: pd.DataFrame, events: List[str]) -> Optional[pd.Series]:
-    """
-    Returns a boolean Series indexed by week:
-      True if that week contains ANY row whose event_fact is in selected events.
-    If no events selected -> None (no mask).
-    """
     if not events:
         return None
     if weekly_df is None or weekly_df.empty or "week" not in weekly_df.columns or "event_fact" not in weekly_df.columns:
@@ -104,7 +100,6 @@ def _make_week_mask(weekly_df: pd.DataFrame, events: List[str]) -> Optional[pd.S
     ev_set = set(_norm_list(events))
     tmp = weekly_df[["week", "event_fact"]].copy()
     tmp["event_fact"] = tmp["event_fact"].astype(str).str.strip().str.lower()
-    # any match within week across services
     mask = tmp.groupby("week")["event_fact"].apply(lambda s: bool(set(s.dropna()).intersection(ev_set)))
     return mask
 
@@ -123,11 +118,8 @@ def _rolling_mad(v: pd.Series, win: int) -> pd.Series:
 
 
 def _robust_z(v: pd.Series, win: int) -> pd.DataFrame:
-    
     v_clean = v.replace(0, np.nan)
-    
-    x = v_clean.astype(float) # Use the cleaned version for calculation
-    
+    x = v_clean.astype(float)
     mean = _rolling_mean(x, win).shift(1)
     mad = _rolling_mad(x, win).shift(1)
 
@@ -148,6 +140,117 @@ def _rarity(severity: float) -> str:
     if severity >= SOFT_Z_TH:
         return "UNUSUAL"
     return "NORMAL"
+
+
+def _severity_scatter_fig(incidents_df: pd.DataFrame, week_range: List[int], selected_ids: List[str] = None) -> go.Figure:
+    """Plots severity Z-values over time for all services in one plot."""
+    wmin, wmax = int(week_range[0]), int(week_range[1])
+    if incidents_df is None or incidents_df.empty:
+        return _empty_fig("Incident Severity Breakdown", "No Unusual/Rare incidents detected.")
+
+    df = incidents_df.copy()
+    df["week_num"] = df["week"].apply(lambda x: int(str(x).replace('W', '')))
+
+    fig = go.Figure()
+    services = sorted(df["service"].unique())
+    colors = px.colors.qualitative.Plotly
+
+    for i, svc in enumerate(services):
+        svc_df = df[df["service"] == svc]
+        
+        # Brushing logic: Dim points not in selection if selection exists
+        opacity = 1.0
+        if selected_ids is not None:
+            opacity = [1.0 if row_id in selected_ids else 0.2 for row_id in svc_df["id"]]
+
+        fig.add_trace(go.Scatter(
+            x=svc_df["week_num"],
+            y=svc_df["severity"],
+            mode="markers",
+            name=str(svc),
+            customdata=svc_df["id"],
+            marker=dict(
+                size=10, 
+                line=dict(width=1, color='DarkSlateGrey'), 
+                color=colors[i % len(colors)],
+                opacity=opacity
+            ),
+            text=svc_df["metric"] + " (" + svc_df["rarity"] + ")",
+            hovertemplate="<b>%{name}</b><br>Week: %{x}<br>Z-Score: %{y}<br>Metric: %{text}<extra></extra>"
+        ))
+
+    fig.add_hline(y=SOFT_Z_TH, line_dash="dash", line_color="orange", annotation_text="Unusual Threshold")
+    fig.add_hline(y=SEVERE_Z_TH, line_dash="dash", line_color="red", annotation_text="Rare Threshold")
+
+    fig.update_layout(
+        template="plotly",
+        height=320,
+        margin=dict(l=36, r=18, t=54, b=36),
+        title=dict(text="Incident Severity Breakdown (Z-Score by Service)", x=0.02, xanchor="left"),
+        xaxis_title="Week",
+        yaxis_title="Severity (Z-score)",
+        legend=dict(orientation="h", y=1.1, x=0.0),
+        hovermode="closest",
+        clickmode='event+select', # Supports multiple selection clicks
+        dragmode='select'
+    )
+    _format_week_axis(fig, wmin, wmax)
+    return fig
+
+
+def _service_event_point_fig(incidents_df: pd.DataFrame, selected_ids: List[str] = None) -> go.Figure:
+    """Point plot with services on x-axis and Z-value on y-axis, grouped by events."""
+    if incidents_df is None or incidents_df.empty:
+        return _empty_fig("Service-Event Severity Impact", "No incidents detected.")
+
+    df = incidents_df.copy()
+    df["event_fact"] = df["event_fact"].replace("none", "No specific event")
+
+    fig = go.Figure()
+    events = sorted(df["event_fact"].unique())
+    colors = px.colors.qualitative.Antique
+
+    for i, evt in enumerate(events):
+        evt_df = df[df["event_fact"] == evt]
+        
+        # Brushing logic: Dim points not in selection if selection exists
+        opacity = 1.0
+        if selected_ids is not None:
+            opacity = [1.0 if row_id in selected_ids else 0.2 for row_id in evt_df["id"]]
+
+        fig.add_trace(go.Scatter(
+            x=evt_df["service"],
+            y=evt_df["severity"],
+            mode="markers",
+            name=str(evt),
+            customdata=evt_df["id"],
+            marker=dict(
+                size=12,
+                symbol='diamond',
+                line=dict(width=1, color='white'),
+                color=colors[i % len(colors)],
+                opacity=opacity
+            ),
+            text=evt_df["week"] + ": " + evt_df["metric"],
+            hovertemplate="<b>Event: %{fullData.name}</b><br>Service: %{x}<br>Severity Z: %{y}<br>Details: %{text}<extra></extra>"
+        ))
+
+    fig.update_layout(
+        template="plotly_white",
+        height=400,
+        margin=dict(l=40, r=20, t=60, b=60),
+        title=dict(text="Severity Impact by Service & Event Type", x=0.02, xanchor="left"),
+        xaxis_title="Medical Service",
+        yaxis_title="Severity (Z-score)",
+        legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
+        clickmode='event+select', # Supports multiple selection clicks
+        dragmode='select'
+    )
+    
+    fig.add_hline(y=SOFT_Z_TH, line_dash="dash", line_color="orange", opacity=0.5)
+    fig.add_hline(y=SEVERE_Z_TH, line_dash="dash", line_color="red", opacity=0.5)
+
+    return fig
 
 
 # =====================================================
@@ -188,10 +291,8 @@ def _build_weekly_table(
         out["event_flag"] = 0
         return out, metrics
 
-    # KPI aggregation per (week, service)
     out = df.groupby(["week", "service"], as_index=False).agg({m: "mean" for m in metrics})
 
-    # event_fact per (week, service)
     if "event" in df.columns:
         ev = (
             df.groupby(["week", "service"])["event"]
@@ -206,14 +307,12 @@ def _build_weekly_table(
     out = out.merge(ev, on=["week", "service"], how="left")
     out["event_fact"] = out["event_fact"].fillna("none").astype(str).str.strip().str.lower()
 
-    # event_flag for highlight bands (based on selected events)
     ev_set = set(_norm_list(events)) if events else None
     if ev_set is None:
         out["event_flag"] = (out["event_fact"] != "none").astype(int)
     else:
         out["event_flag"] = out["event_fact"].isin(ev_set).astype(int)
 
-    # full grid per service (continuous axis)
     svc_list = sorted(out["service"].dropna().astype(str).unique().tolist())
     full = (
         pd.MultiIndex.from_product([list(range(wmin, wmax + 1)), svc_list], names=["week", "service"])
@@ -225,15 +324,12 @@ def _build_weekly_table(
 
     return out, metrics
 
+
 def _staff_per_service(
     staff_week_service_df: pd.DataFrame,
     week_range: List[int],
     services: List[str],
 ) -> pd.DataFrame:
-    """
-    Calculates the staffing ratio and a rolling baseline delta.
-    Ignores the 3N weeks (set to NaN) in the mean calculation.
-    """
     wmin, wmax = int(week_range[0]), int(week_range[1])
     weeks = list(range(wmin, wmax + 1))
 
@@ -258,9 +354,6 @@ def _staff_per_service(
         patients_request=("patients_request", "sum") if "patients_request" in df.columns else ("staff_present_total", "size"),
     )
 
-    # ---------------------------------------------------------
-    # CHANGE 1: Mask 3N weeks as NaN (Not 0)
-    # ---------------------------------------------------------
     is_3n_week = (agg["week"] % 3 == 0)
     agg.loc[is_3n_week, "staff_present_total"] = np.nan
     
@@ -272,18 +365,9 @@ def _staff_per_service(
     
     for svc, g in agg.groupby("service", sort=False):
         idx = g.index
-        
-        # ---------------------------------------------------------
-        # CHANGE 2: Do NOT fillna(0). Keep them as NaN.
-        # ---------------------------------------------------------
         s_values = g["staff_to_request"] 
-        
-        # Pandas mean() with min_periods=1 will now calculate:
-        # (Sum of 4 valid weeks) / 4
         rolling_base = s_values.rolling(window=ROLL_WIN, min_periods=1).mean().shift(1)
-        
         agg.loc[idx, "staff_delta"] = (s_values - rolling_base).values
-
 
     svc_names = sorted(agg["service"].dropna().astype(str).unique().tolist())
     weeks_full = pd.MultiIndex.from_product([weeks, svc_names], names=["week", "service"]).to_frame(index=False)
@@ -295,6 +379,8 @@ def _staff_per_service(
     )
     
     return out
+
+
 def _staff_agg(staff_week_service_df: pd.DataFrame, week_range: List[int], services: List[str]) -> pd.DataFrame:
     wmin, wmax = int(week_range[0]), int(week_range[1])
     weeks = list(range(wmin, wmax + 1))
@@ -329,11 +415,9 @@ def _staff_agg(staff_week_service_df: pd.DataFrame, week_range: List[int], servi
     return out
 
 
-# =====================================================
-# Incident detection (per service, one-sided)
-# =====================================================
 @dataclass
 class IncidentRow:
+    id: str
     service: str
     week: int
     metric: str
@@ -397,6 +481,7 @@ def _detect_incidents(
 
                 rows.append(
                     IncidentRow(
+                        id=f"{svc}-{w}-{m}", # Unique ID for table and brushing
                         service=str(svc),
                         week=w,
                         metric=m,
@@ -413,16 +498,8 @@ def _detect_incidents(
     if not rows:
         return pd.DataFrame(
             columns=[
-                "service",
-                "week",
-                "metric",
-                "value",
-                "baseline",
-                "severity",
-                "rarity",
-                "event_fact",
-                "staff_to_request",
-                "staff_delta",
+                "id", "service", "week", "metric", "value", "baseline",
+                "severity", "rarity", "event_fact", "staff_to_request", "staff_delta",
             ]
         )
 
@@ -439,17 +516,11 @@ def _detect_incidents(
     return df
 
 
-# =====================================================
-# Aggregated weekly tables for charts
-# IMPORTANT:
-#   - weekly_full: no event masking (baseline computed on full)
-#   - weekly_show: masked by selected event weeks (display only)
-# =====================================================
 def _aggregate_weekly(
     weekly_df: pd.DataFrame,
     metrics: List[str],
     week_range: List[int],
-    week_mask: Optional[pd.Series] = None,  # index=week, bool
+    week_mask: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     wmin, wmax = int(week_range[0]), int(week_range[1])
     weeks = list(range(wmin, wmax + 1))
@@ -464,7 +535,6 @@ def _aggregate_weekly(
     g = weekly_df.groupby("week", as_index=False).agg({m: "mean" for m in metrics})
     out = out.merge(g, on="week", how="left")
 
-    # event_flag for bands
     if "event_flag" in weekly_df.columns:
         ev = weekly_df.groupby("week")["event_flag"].max().reset_index()
         out = out.merge(ev, on="week", how="left")
@@ -472,7 +542,6 @@ def _aggregate_weekly(
     else:
         out["event_flag"] = 0
 
-    # mask: display only selected-event weeks
     if week_mask is not None:
         m = week_mask.reindex(out["week"]).fillna(False).to_numpy()
         for col in metrics:
@@ -497,42 +566,17 @@ def _kpi_fig(weekly_full: pd.DataFrame, weekly_show: pd.DataFrame, metric: str, 
     if weekly_full is None or weekly_full.empty or metric not in weekly_full.columns:
         return _empty_fig("KPI", "No data under current filters.")
 
-    # baseline computed from full series
     s_full = weekly_full.set_index("week")[metric].reindex(range(wmin, wmax + 1)).astype(float)
     if s_full.dropna().empty:
         return _empty_fig("KPI", "No data under current filters.")
     dfz_full = _robust_z(s_full, ROLL_WIN)
 
-    # displayed values from masked series
     s_show = weekly_show.set_index("week")[metric].reindex(range(wmin, wmax + 1)).astype(float) if weekly_show is not None and not weekly_show.empty else s_full * np.nan
 
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=dfz_full.index,
-            y=s_show,
-            mode="lines+markers",
-            name=f"{metric} (avg)",
-            connectgaps=True,  # Scheme B: connect across masked weeks
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=dfz_full.index,
-            y=dfz_full["baseline"],
-            mode="lines",
-            name=f"Baseline ({ROLL_WIN}w, median)",
-            connectgaps=True,
-        )
-    )
-    fig.update_layout(
-        template="plotly",
-        height=320,
-        margin=dict(l=36, r=18, t=54, b=36),
-        title=dict(text=f"{metric}", x=0.02, xanchor="left"),
-        legend=dict(orientation="h", y=1.02, x=0.0),
-        hovermode="x unified",
-    )
+    fig.add_trace(go.Scatter(x=dfz_full.index, y=s_show, mode="lines+markers", name=f"{metric} (avg)", connectgaps=True))
+    fig.add_trace(go.Scatter(x=dfz_full.index, y=dfz_full["baseline"], mode="lines", name=f"Baseline ({ROLL_WIN}w, median)", connectgaps=True))
+    fig.update_layout(template="plotly", height=320, margin=dict(l=36, r=18, t=54, b=36), title=dict(text=f"{metric}", x=0.02, xanchor="left"), legend=dict(orientation="h", y=1.02, x=0.0), hovermode="x unified")
     _add_event_bands(fig, weekly_show, wmin, wmax)
     _format_week_axis(fig, wmin, wmax)
     fig.update_yaxes(automargin=True)
@@ -549,54 +593,12 @@ def _staff_fig(staff_full: pd.DataFrame, staff_show: pd.DataFrame, week_range: L
         return _empty_fig("Staff", "No staff context under current filters.")
     dfz_full = _robust_z(s_full, ROLL_WIN)
 
-    s_show = (
-        staff_show.set_index("week")["staff_to_request"].reindex(range(wmin, wmax + 1)).astype(float)
-        if staff_show is not None and (not staff_show.empty) and ("staff_to_request" in staff_show.columns)
-        else s_full * np.nan
-    )
+    s_show = staff_show.set_index("week")["staff_to_request"].reindex(range(wmin, wmax + 1)).astype(float) if staff_show is not None and (not staff_show.empty) and ("staff_to_request" in staff_show.columns) else s_full * np.nan
 
     fig = go.Figure()
-    """
-    fig.add_trace(
-        go.Scatter(
-            x=dfz_full.index,
-            y=s_show,
-            mode="lines+markers",
-            name="staff_to_request",
-            connectgaps=True,
-        )
-    )
-    """
-    fig.add_trace(
-        go.Scatter(
-            x=dfz_full.index,
-            y=s_show.replace(0, np.nan), # Treat 0 as missing for the UI
-            mode="lines+markers",
-            name="Staffing Ratio",
-            connectgaps=True, # This bridges the "0" weeks visually
-        )
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=dfz_full.index,
-            y=dfz_full["baseline"],
-            mode="lines",
-            name=f"Baseline ({ROLL_WIN}w, mean)",
-            connectgaps=True,
-        )
-    )
-    
-    
-    
-    fig.update_layout(
-        template="plotly",
-        height=320,
-        margin=dict(l=36, r=18, t=54, b=36),
-        title=dict(text="Staff context", x=0.02, xanchor="left"),
-        legend=dict(orientation="h", y=1.02, x=0.0),
-        hovermode="x unified",
-    )
+    fig.add_trace(go.Scatter(x=dfz_full.index, y=s_show.replace(0, np.nan), mode="lines+markers", name="Staffing Ratio", connectgaps=True))
+    fig.add_trace(go.Scatter(x=dfz_full.index, y=dfz_full["baseline"], mode="lines", name=f"Baseline ({ROLL_WIN}w, mean)", connectgaps=True))
+    fig.update_layout(template="plotly", height=320, margin=dict(l=36, r=18, t=54, b=36), title=dict(text="Staff context", x=0.02, xanchor="left"), legend=dict(orientation="h", y=1.02, x=0.0), hovermode="x unified")
     _format_week_axis(fig, wmin, wmax)
     fig.update_yaxes(automargin=True, rangemode="tozero")
     return fig
@@ -611,62 +613,36 @@ def _heatmap_fig(weekly_full: pd.DataFrame, week_mask: Optional[pd.Series], metr
 
     keep, mat = [], []
     for m in metrics:
-        if m not in weekly_full.columns:
-            continue
+        if m not in weekly_full.columns: continue
         s = weekly_full.set_index("week")[m].reindex(weeks).astype(float)
-        if s.dropna().shape[0] < MIN_POINTS:
-            continue
+        if s.dropna().shape[0] < MIN_POINTS: continue
         z = _robust_z(s, ROLL_WIN)["z_raw"].reindex(weeks).astype(float)
 
-        # apply event mask to display (Scheme B)
         if week_mask is not None:
             mm = week_mask.reindex(weeks).fillna(False).to_numpy()
             z = z.where(mm, np.nan)
 
-        if z.dropna().empty:
-            continue
-
+        if z.dropna().empty: continue
         keep.append(m)
         mat.append(z.fillna(0.0).clip(-Z_CLAMP, Z_CLAMP).values)
 
-    if not keep:
-        return _empty_fig("Fingerprint", "Not enough data under current filters.")
+    if not keep: return _empty_fig("Fingerprint", "Not enough data under current filters.")
 
     zmat = np.vstack(mat)
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=zmat,
-            x=weeks,
-            y=keep,
-            zmid=0,
-            colorscale="RdBu",
-            hovertemplate="Metric=%{y}<br>Week=%{x}<br>Z=%{z:.2f}<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        template="plotly",
-        height=320,
-        margin=dict(l=36, r=18, t=54, b=36),
-        title=dict(text="Incident fingerprint (Z-score heatmap)", x=0.02, xanchor="left"),
-    )
+    fig = go.Figure(data=go.Heatmap(z=zmat, x=weeks, y=keep, zmid=0, colorscale="RdBu", hovertemplate="Metric=%{y}<br>Week=%{x}<br>Z=%{z:.2f}<extra></extra>"))
+    fig.update_layout(template="plotly", height=320, margin=dict(l=36, r=18, t=54, b=36), title=dict(text="Incident fingerprint (Z-score heatmap)", x=0.02, xanchor="left"))
     _format_week_axis(fig, wmin, wmax)
     fig.update_yaxes(automargin=True)
     return fig
 
 
-# =====================================================
-# Layout
-# =====================================================
 def make_incidents_panel() -> html.Div:
     return html.Div(
         [
             html.Div(
                 [
                     html.Div("Incidents", style={"fontSize": "18px", "fontWeight": 700}),
-                    html.Div(
-                        "Table is filtered by menu (week/service/event). Charts follow event-filter (scheme B: only show selected event weeks, but lines stay connected).",
-                        style={"opacity": 0.7, "fontSize": "12px", "marginTop": "2px"},
-                    ),
+                    html.Div("Table is filtered by menu (week/service/event). Charts follow event-filter.", style={"opacity": 0.7, "fontSize": "12px", "marginTop": "2px"}),
                 ],
                 style={"marginBottom": "10px"},
             ),
@@ -680,21 +656,14 @@ def make_incidents_panel() -> html.Div:
             dash_table.DataTable(
                 id="incidents-table",
                 columns=[
-                    {"name": "Service", "id": "service"},
-                    {"name": "Week", "id": "week"},
-                    {"name": "Metric", "id": "metric"},
-                    {"name": "Value", "id": "value", "type": "numeric"},
-                    {"name": "Baseline", "id": "baseline", "type": "numeric"},
-                    {"name": "Severity Z", "id": "severity", "type": "numeric"},
-                    {"name": "Rarity", "id": "rarity"},
-                    {"name": "Event", "id": "event_fact"},
-                    {"name": "Staff to request", "id": "staff_to_request", "type": "numeric"},
-                    {"name": "Staff Δ", "id": "staff_delta", "type": "numeric"},
+                    {"name": "ID", "id": "id"}, # Added ID column
+                    {"name": "Service", "id": "service"}, {"name": "Week", "id": "week"},
+                    {"name": "Metric", "id": "metric"}, {"name": "Value", "id": "value", "type": "numeric"},
+                    {"name": "Baseline", "id": "baseline", "type": "numeric"}, {"name": "Severity Z", "id": "severity", "type": "numeric"},
+                    {"name": "Rarity", "id": "rarity"}, {"name": "Event", "id": "event_fact"},
+                    {"name": "Staff to request", "id": "staff_to_request", "type": "numeric"}, {"name": "Staff Δ", "id": "staff_delta", "type": "numeric"},
                 ],
-                data=[],
-                page_size=12,
-                sort_action="native",
-                row_selectable="single", # Enabled radio button mechanism
+                data=[], page_size=12, sort_action="native", row_selectable="single",
                 style_table={"overflowX": "auto", "marginTop": "8px"},
                 style_cell={"fontSize": "13px", "padding": "8px 10px", "whiteSpace": "nowrap"},
                 style_header={"fontWeight": 600, "borderBottom": "1px solid #ddd"},
@@ -705,6 +674,8 @@ def make_incidents_panel() -> html.Div:
                     html.Div(dcc.Graph(id="inc-fig1", config={"displayModeBar": False}), style={"flex": "1 1 320px", "minWidth": "320px"}),
                     html.Div(dcc.Graph(id="inc-fig2", config={"displayModeBar": False}), style={"flex": "1 1 320px", "minWidth": "320px"}),
                     html.Div(dcc.Graph(id="inc-fig3", config={"displayModeBar": False}), style={"flex": "1 1 320px", "minWidth": "320px"}),
+                    html.Div(dcc.Graph(id="inc-fig-severity", config={"displayModeBar": True}), style={"flex": "1 1 100%", "minWidth": "320px"}),
+                    html.Div(dcc.Graph(id="inc-fig-service-event", config={"displayModeBar": True}), style={"flex": "1 1 100%", "minWidth": "320px"}),
                 ],
                 style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "alignItems": "stretch", "paddingTop": "10px"},
             ),
@@ -717,60 +688,49 @@ def layout() -> html.Div:
     return make_incidents_panel()
 
 
-# =====================================================
-# Callback
-# =====================================================
 @callback(
     Output("inc-summary", "children"),
     Output("incidents-table", "data"),
     Output("inc-fig1", "figure"),
     Output("inc-fig2", "figure"),
     Output("inc-fig3", "figure"),
+    Output("inc-fig-severity", "figure"),
+    Output("inc-fig-service-event", "figure"),
     Input("week-range", "value"),
     Input("service-filter", "value"),
-    Input("event-filter", "value")
+    Input("event-filter", "value"),
+    Input("inc-fig-severity", "selectedData"), # Added brushing input
+    Input("inc-fig-service-event", "selectedData") # Added brushing input
 )
-def update_incidents(
-    week_range: List[int],
-    services: List[str],
-    events: List[str]
-):
-    if not week_range or len(week_range) != 2:
-        week_range = [1, 52]
+def update_incidents(week_range: List[int], services: List[str], events: List[str], sel_sev, sel_impact):
+    import dash
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
-    if not services:
-        services = list(getattr(config, "SERVICES_ORDER", []))
-
-    events = events or []  # empty => no constraint
+    if not week_range or len(week_range) != 2: week_range = [1, 52]
+    if not services: services = list(getattr(config, "SERVICES_ORDER", []))
+    events = events or []
 
     weekly_df, metrics = _build_weekly_table(_services_df, week_range, services, events)
     staff_ps = _staff_per_service(_staff_week_service_df, week_range, services)
     staff_ag_full = _staff_agg(_staff_week_service_df, week_range, services)
 
-    # --- SHARED WEEK SELECTION MECHANISM ---
-    shared_week = 1 # Default week value
-
-    # ---------------------------------------
-
     if weekly_df is None or weekly_df.empty or not metrics:
-        return (
-            "0 incident(s) detected.",
-            [],
-            _empty_fig("KPI", "No data."),
-            _empty_fig("Staff", "No data."),
-            _empty_fig("Fingerprint", "No data.")
-        )
+        return "0 incident(s).", [], _empty_fig("KPI", ""), _empty_fig("Staff", ""), _empty_fig("Fingerprint", ""), _empty_fig("Severity", ""), _empty_fig("Service-Event", "")
 
-    # ---- incident table (compute using all weeks; then filter rows by selected events) ----
     incidents_df = _detect_incidents(weekly_df, metrics, week_range, staff_ps)
 
     if events and (incidents_df is not None) and (not incidents_df.empty) and ("event_fact" in incidents_df.columns):
         ev_set = set(_norm_list(events))
         incidents_df = incidents_df[incidents_df["event_fact"].astype(str).str.strip().str.lower().isin(ev_set)]
 
-    # ---- chart mask (scheme B): only show selected event weeks ----
-    week_mask = _make_week_mask(weekly_df, events)  # None if no events selected
+    # Handle cross-figure brushing
+    selected_ids = None
+    selection = sel_sev if triggered_id == "inc-fig-severity" else sel_impact
+    if selection and "points" in selection:
+        selected_ids = [p["customdata"] for p in selection["points"]]
 
+    week_mask = _make_week_mask(weekly_df, events)
     weekly_full = _aggregate_weekly(weekly_df, metrics, week_range, week_mask=None)
     weekly_show = _aggregate_weekly(weekly_df, metrics, week_range, week_mask=week_mask)
 
@@ -781,22 +741,18 @@ def update_incidents(
             staff_ag_show.loc[~mm, "staff_to_request"] = np.nan
 
     primary = "shortage_rate" if "shortage_rate" in metrics else metrics[0]
-
     fig1 = _kpi_fig(weekly_full, weekly_show, primary, week_range)
     fig2 = _staff_fig(staff_ag_full, staff_ag_show, week_range)
     fig3 = _heatmap_fig(weekly_full, week_mask, metrics, week_range)
-
-    if incidents_df is None or incidents_df.empty:
-        return (
-            "0 incident(s) detected (UNUSUAL/RARE) under current filters.", 
-            [], fig1, fig2, fig3
-        )
+    
+    # Graphs updated with potential brushing IDs
+    fig_severity = _severity_scatter_fig(incidents_df, week_range, selected_ids)
+    fig_service_event = _service_event_point_fig(incidents_df, selected_ids)
 
     summary = f"{len(incidents_df)} incident(s) detected (UNUSUAL/RARE) under current filters."
-    return summary, incidents_df.to_dict("records"), fig1, fig2, fig3
+    return summary, incidents_df.to_dict("records"), fig1, fig2, fig3, fig_severity, fig_service_event
 
 
-# CALLBACK 2: Specific Sync (Triggers only on table interaction)
 @callback(
     Output("shared-selected-week", "data"),
     Input("incidents-table", "selected_rows"),
@@ -804,11 +760,8 @@ def update_incidents(
     prevent_initial_call=True
 )
 def sync_selection_to_store(selected_rows, table_data):
-    if not selected_rows or not table_data:
-        return no_update
+    if not selected_rows or not table_data: return no_update
     try:
         row = table_data[selected_rows[0]]
-        week_val = int(str(row['week']).replace('W', ''))
-        return week_val
-    except:
-        return no_update
+        return int(str(row['week']).replace('W', ''))
+    except: return no_update

@@ -63,6 +63,7 @@ def layout():
                             html.H6("Weekly trend (mean shortage rate)"),
                             dcc.Graph(
                                 id="overview-trend",
+                                figure=go.Figure(), # Add this
                                 config={"displayModeBar": False},
                                 style={"height": "320px"},
                             ),
@@ -371,7 +372,14 @@ def overview_update(week_range, services, events, store):
     )
 
     trend = df_sw.groupby("week", as_index=False)["shortage_rate"].mean().sort_values("week")
-    fig_trend = px.line(trend, x="week", y="shortage_rate", labels={"week": "Week", "shortage_rate": "Mean shortage rate"})
+    #fig_trend = px.line(trend, x="week", y="shortage_rate", labels={"week": "Week", "shortage_rate": "Mean shortage rate"})
+    fig_trend = px.line(
+        trend, 
+        x="week", 
+        y="shortage_rate", 
+        labels={"week": "Week", "shortage_rate": "Mean shortage rate"},
+        template="plotly"  # Explicitly setting the template often fixes this recursion error
+    )
     fig_trend.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     if len(df_sw):
         fig_trend.update_yaxes(range=[0, max(0.01, float(df_sw["shortage_rate"].max()))])
