@@ -1,16 +1,10 @@
-# JBI100-example-app
-
-## About this app
-
-You can use this as a basic template for your JBI100 visualization project.
+# JBI100-Group31
 
 ## Requirements
-
 * Python 3 (add it to your path (system variables) to make sure you can access it from the command prompt)
 * Git (https://git-scm.com/book/en/v2/Getting-Started-Installing-Git)
 
 ## How to run this app
-
 We suggest you to create a virtual environment for running this app with Python 3. Clone this repository 
 and open your terminal/command prompt in the root folder.
 
