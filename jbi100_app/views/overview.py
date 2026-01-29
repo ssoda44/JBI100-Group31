@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from dash import html, dcc, callback, Input, Output, State
+from dash import html, dcc, callback, Input, Output, State, no_update
 
 from ..data import get_data
 from .. import config
@@ -542,38 +542,52 @@ def overview_update(week_range, services, events, store):
     return fig_hm, fig_trend, fig_ref, kpis
 
 
-# --- brushing controller (time-range brush via zoom/drag on either trend/refused) ---
+# --- brushing controller ---
 @callback(
     Output("global-store", "data", allow_duplicate=True),
     Input("overview-trend", "relayoutData"),
     Input("overview-refused", "relayoutData"),
+    Input("overview-heatmap", "relayoutData"),
     State("global-store", "data"),
     prevent_initial_call=True,
 )
-def overview_brush_update(relayout_trend, relayout_ref, store):
+def overview_brush_update(relayout_trend, relayout_ref, relayout_hm, store):
     store = store or {}
 
-    # decide which relayout to use (prefer the one that has actual range info)
-    candidates = [r for r in (relayout_trend, relayout_ref) if isinstance(r, dict) and len(r)]
+    candidates = [
+        r for r in (relayout_trend, relayout_ref, relayout_hm)
+        if isinstance(r, dict) and r
+    ]
     if not candidates:
-        return store
+        return no_update
 
-    relayout = None
-    for r in candidates:
-        if "xaxis.range[0]" in r or "xaxis.range" in r or "xaxis.autorange" in r:
-            relayout = r
-            break
+    relayout = next(
+        (
+            r for r in candidates
+            if any(k.endswith(".range[0]") for k in r.keys())
+            or any(k.endswith(".range") for k in r.keys())
+            or any(k.endswith(".autorange") and r.get(k) is True for k in r.keys())
+        ),
+        None,
+    )
     if relayout is None:
-        relayout = candidates[0]
+        return no_update
 
     w0, w1, cleared = _parse_brush_from_relayout(relayout)
+
     if cleared:
-        store.pop("brush", None)
-        return store
+        if "brush" in store:
+            store.pop("brush", None)
+            return store
+        return no_update
 
     if w0 is not None and w1 is not None:
-        store["brush"] = {"w0": int(w0), "w1": int(w1)}
-    return store
+        new_brush = {"w0": int(w0), "w1": int(w1)}
+        if store.get("brush") != new_brush:
+            store["brush"] = new_brush
+            return store
+
+    return no_update
 
 
 @callback(
